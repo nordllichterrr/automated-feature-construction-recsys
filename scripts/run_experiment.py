@@ -13,6 +13,29 @@ from src.feature_construction.split import temporal_split
 
 RESULTS_DIR = Path("results")
 
+EXPERIMENTS = [
+    {
+        "name": "baseline",
+        "include_history": False,
+        "include_rating_statistics": False,
+    },
+    {
+        "name": "history_counts",
+        "include_history": True,
+        "include_rating_statistics": False,
+    },
+    {
+        "name": "rating_statistics",
+        "include_history": False,
+        "include_rating_statistics": True,
+    },
+    {
+        "name": "combined",
+        "include_history": True,
+        "include_rating_statistics": True,
+    },
+]
+
 
 def main():
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -31,40 +54,52 @@ def main():
         events,
         FeatureConfig(windows_days=(1, 7, 30)),
     )
-    print("Время построения: {:.1f} сек.".format(time.time() - started))
+    feature_build_seconds = time.time() - started
+
+    print("Время построения: {:.1f} сек.".format(feature_build_seconds))
 
     timestamps = pd.to_datetime(features["timestamp"], utc=True)
-    train_mask = timestamps <= train_end
-    validation_mask = (timestamps > train_end) & (timestamps <= validation_end)
-    test_mask = timestamps > validation_end
 
-    partitions = [
-        features.loc[train_mask].copy(),
-        features.loc[validation_mask].copy(),
-        features.loc[test_mask].copy(),
+    masks = [
+        timestamps <= train_end,
+        (timestamps > train_end) & (timestamps <= validation_end),
+        timestamps > validation_end,
     ]
 
-    if [len(part) for part in partitions] != [
-        len(train), len(validation), len(test)
-    ]:
-        raise RuntimeError("Размеры выборок не совпали после построения признаков")
+    partitions = [features.loc[mask].copy() for mask in masks]
+
+    expected_lengths = [len(train), len(validation), len(test)]
+    actual_lengths = [len(partition) for partition in partitions]
+
+    if actual_lengths != expected_lengths:
+        raise RuntimeError(
+            "Размеры выборок не совпали после построения признаков: "
+            f"{actual_lengths} != {expected_lengths}"
+        )
 
     results = []
 
-    for name, include_history in [
-        ("baseline", False),
-        ("manual_history", True),
-    ]:
+    for experiment in EXPERIMENTS:
+        name = experiment["name"]
+        include_history = experiment["include_history"]
+        include_rating_statistics = experiment["include_rating_statistics"]
+
         print("\nЭксперимент:", name)
 
         X_train, y_train, categorical = prepare_model_data(
-            partitions[0], include_history
+            partitions[0],
+            include_history=include_history,
+            include_rating_statistics=include_rating_statistics,
         )
         X_val, y_val, _ = prepare_model_data(
-            partitions[1], include_history
+            partitions[1],
+            include_history=include_history,
+            include_rating_statistics=include_rating_statistics,
         )
         X_test, y_test, _ = prepare_model_data(
-            partitions[2], include_history
+            partitions[2],
+            include_history=include_history,
+            include_rating_statistics=include_rating_statistics,
         )
 
         model = create_model()
@@ -79,6 +114,8 @@ def main():
             verbose=100,
         )
 
+        fit_seconds = time.time() - started
+
         val_probabilities = model.predict_proba(X_val)[:, 1]
         test_probabilities = model.predict_proba(X_test)[:, 1]
 
@@ -87,21 +124,27 @@ def main():
 
         result = {
             "experiment": name,
+            "include_history": include_history,
+            "include_rating_statistics": include_rating_statistics,
+            "feature_count": X_train.shape[1],
             "best_iteration": model.get_best_iteration(),
-            "fit_seconds": round(time.time() - started, 2),
+            "fit_seconds": round(fit_seconds, 2),
+            "feature_build_seconds": round(feature_build_seconds, 2),
             "validation_roc_auc": val_metrics["roc_auc"],
             "validation_log_loss": val_metrics["log_loss"],
             "test_roc_auc": test_metrics["roc_auc"],
             "test_log_loss": test_metrics["log_loss"],
         }
+
         results.append(result)
         print(result)
 
+    results_df = pd.DataFrame(results)
     results_path = RESULTS_DIR / "metrics.csv"
-    pd.DataFrame(results).to_csv(results_path, index=False)
+    results_df.to_csv(results_path, index=False)
 
     print("\nИтоговая таблица:")
-    print(pd.DataFrame(results).to_string(index=False))
+    print(results_df.to_string(index=False, float_format=lambda value: f"{value:.6f}"))
     print("\nРезультаты сохранены в", results_path)
 
 
